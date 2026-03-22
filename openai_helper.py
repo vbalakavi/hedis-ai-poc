@@ -47,5 +47,5 @@ def get_client():
     base_dir = Path(__file__).resolve().parent
     api_key = load_api_key(base_dir)
     if not api_key:
-        raise RuntimeError("OPENAI_API_KEY is missing. Add it to the repo's .env file.")
+        raise RuntimeError("OPENAI_API_KEY is missing. Add it to 3_Hedis_AI/.env.")
     return OpenAI(api_key=api_key)

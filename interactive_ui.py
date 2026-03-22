@@ -12,9 +12,36 @@ from loadJson import load_measures
 from openai_helper import get_client, load_api_key
 
 
+MEASURE_DETAIL_FIELDS = [
+    ("Product Lines", "product_lines"),
+    ("Definition", "definition"),
+    ("Eligible Population", "eligible_population"),
+    ("Continuous Enrollment", "continuous_enrollment"),
+    ("Denominator", "denominator"),
+    ("Numerator", "numerator"),
+    ("Best Practice and Measure Tips", "best_practice_tips"),
+    ("Exclusions", "exclusions"),
+    ("Measure Codes", "measure_codes"),
+    ("Exclusion Codes", "exclusion_codes"),
+]
+
+SECTION_LABELS = {
+    "product_lines": ["Product Lines:"],
+    "definition": ["Definition:", "Description:"],
+    "eligible_population": ["Eligible Population:"],
+    "continuous_enrollment": ["Continuous Enrollment:", "Continuous Enrollment/Allocation:"],
+    "denominator": ["Denominator:"],
+    "numerator": ["Numerator Compliance", "Numerator:"],
+    "best_practice_tips": ["Best Practice and Measure Tips"],
+    "exclusions": ["Measure Exclusions", "Required Exclusions:", "Exclusions:"],
+    "measure_codes": ["Measure Codes"],
+    "exclusion_codes": ["Exclusion Codes"],
+}
+
+
 @st.cache_data
 def get_measures():
-    return load_measures()
+    return [normalize_measure_record(measure) for measure in load_measures()]
 
 
 DEFAULT_QUESTIONS = [
@@ -54,6 +81,99 @@ def tokenize(text):
     return re.findall(r"[a-z0-9]+", str(text).lower())
 
 
+def clean_inline_text(value):
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def extract_labeled_section(text, start_labels, all_labels):
+    working_text = clean_inline_text(text)
+    if not working_text:
+        return ""
+
+    start_index = -1
+    matched_label = ""
+    for label in start_labels:
+        idx = working_text.lower().find(label.lower())
+        if idx != -1 and (start_index == -1 or idx < start_index):
+            start_index = idx
+            matched_label = label
+
+    if start_index == -1:
+        return ""
+
+    section_start = start_index + len(matched_label)
+    section_end = len(working_text)
+    for label in all_labels:
+        if label.lower() == matched_label.lower():
+            continue
+        idx = working_text.lower().find(label.lower(), section_start)
+        if idx != -1 and idx < section_end:
+            section_end = idx
+
+    return clean_inline_text(working_text[section_start:section_end]).strip(":- ")
+
+
+def normalize_measure_record(measure):
+    normalized = dict(measure)
+    raw_measure_name = clean_inline_text(normalized.get("measure_name", ""))
+    title_product_lines = ""
+    if "Product Lines:" in raw_measure_name:
+        raw_measure_name, title_product_lines = raw_measure_name.split("Product Lines:", 1)
+        raw_measure_name = clean_inline_text(raw_measure_name)
+        title_product_lines = clean_inline_text(title_product_lines)
+
+    normalized["measure_name"] = raw_measure_name
+    all_labels = [label for labels in SECTION_LABELS.values() for label in labels]
+    source_text = " ".join(
+        clean_inline_text(measure.get(key, ""))
+        for key in [
+            "measure_name",
+            "description",
+            "eligible_population",
+            "denominator",
+            "numerator",
+            "exclusions",
+            "product_lines",
+        ]
+    )
+
+    normalized.setdefault("description", "")
+    normalized.setdefault("product_lines", "")
+    normalized.setdefault("eligible_population", "")
+    normalized.setdefault("denominator", "")
+    normalized.setdefault("numerator", "")
+    normalized.setdefault("exclusions", "")
+    normalized["product_lines"] = clean_inline_text(
+        normalized.get("product_lines")
+        or title_product_lines
+        or extract_labeled_section(source_text, SECTION_LABELS["product_lines"], all_labels)
+    )
+    normalized["definition"] = clean_inline_text(
+        normalized.get("definition")
+        or extract_labeled_section(source_text, SECTION_LABELS["definition"], all_labels)
+        or normalized.get("description", "")
+    )
+    normalized["continuous_enrollment"] = clean_inline_text(
+        normalized.get("continuous_enrollment")
+        or extract_labeled_section(
+            source_text, SECTION_LABELS["continuous_enrollment"], all_labels
+        )
+    )
+    normalized["best_practice_tips"] = clean_inline_text(
+        normalized.get("best_practice_tips")
+        or extract_labeled_section(source_text, SECTION_LABELS["best_practice_tips"], all_labels)
+    )
+    normalized["measure_codes"] = clean_inline_text(
+        normalized.get("measure_codes")
+        or extract_labeled_section(source_text, SECTION_LABELS["measure_codes"], all_labels)
+    )
+    normalized["exclusion_codes"] = clean_inline_text(
+        normalized.get("exclusion_codes")
+        or extract_labeled_section(source_text, SECTION_LABELS["exclusion_codes"], all_labels)
+    )
+    return normalized
+
+
 def keyword_score(query, document_text):
     query_tokens = tokenize(query)
     document_tokens = tokenize(document_text)
@@ -77,6 +197,7 @@ def keyword_score(query, document_text):
 
 
 def build_measure_context(measure):
+    measure = normalize_measure_record(measure)
     return f"""
 Measure Name:
 {measure.get("measure_name", "")}
@@ -84,8 +205,14 @@ Measure Name:
 Description:
 {measure.get("description", "")}
 
+Definition:
+{measure.get("definition", "")}
+
 Eligible Population:
 {measure.get("eligible_population", "")}
+
+Continuous Enrollment:
+{measure.get("continuous_enrollment", "")}
 
 Denominator:
 {measure.get("denominator", "")}
@@ -93,8 +220,17 @@ Denominator:
 Numerator:
 {measure.get("numerator", "")}
 
+Best Practice and Measure Tips:
+{measure.get("best_practice_tips", "")}
+
 Exclusions:
 {measure.get("exclusions", "")}
+
+Measure Codes:
+{measure.get("measure_codes", "")}
+
+Exclusion Codes:
+{measure.get("exclusion_codes", "")}
 
 Pages:
 {measure.get("pages", [])}
@@ -102,14 +238,20 @@ Pages:
 
 
 def build_searchable_text(measure):
+    measure = normalize_measure_record(measure)
     return "\n".join(
         [
             str(measure.get("measure_name", "")),
             str(measure.get("description", "")),
+            str(measure.get("definition", "")),
             str(measure.get("eligible_population", "")),
+            str(measure.get("continuous_enrollment", "")),
             str(measure.get("denominator", "")),
             str(measure.get("numerator", "")),
+            str(measure.get("best_practice_tips", "")),
             str(measure.get("exclusions", "")),
+            str(measure.get("measure_codes", "")),
+            str(measure.get("exclusion_codes", "")),
         ]
     )
 
@@ -300,21 +442,36 @@ def structure_measure_offline(measure):
     content = measure["content"]
     sections = {
         "description": "",
+        "product_lines": "",
+        "definition": "",
         "eligible_population": "",
+        "continuous_enrollment": "",
         "numerator": "",
         "denominator": "",
+        "best_practice_tips": "",
         "exclusions": "",
+        "measure_codes": "",
+        "exclusion_codes": "",
     }
     current_section = None
 
     for line in content.splitlines():
         lowered = line.lower()
 
-        if "description" in lowered or "definition" in lowered:
+        if "definition" in lowered:
+            current_section = "definition"
+            continue
+        if "description" in lowered:
             current_section = "description"
+            continue
+        if "product lines" in lowered:
+            current_section = "product_lines"
             continue
         if "eligible population" in lowered:
             current_section = "eligible_population"
+            continue
+        if "continuous enrollment" in lowered:
+            current_section = "continuous_enrollment"
             continue
         if "numerator" in lowered:
             current_section = "numerator"
@@ -322,22 +479,39 @@ def structure_measure_offline(measure):
         if "denominator" in lowered:
             current_section = "denominator"
             continue
+        if "best practice and measure tips" in lowered:
+            current_section = "best_practice_tips"
+            continue
         if "exclusion" in lowered:
             current_section = "exclusions"
+            continue
+        if "measure codes" in lowered:
+            current_section = "measure_codes"
+            continue
+        if "exclusion codes" in lowered:
+            current_section = "exclusion_codes"
             continue
         if current_section:
             sections[current_section] += line + " "
 
-    return {
+    return normalize_measure_record(
+        {
         "measure_name": measure["measure_name"],
         "pages": measure["pages"],
         "description": clean_text(sections["description"]),
+        "product_lines": clean_text(sections["product_lines"]),
+        "definition": clean_text(sections["definition"]),
         "eligible_population": clean_text(sections["eligible_population"]),
+        "continuous_enrollment": clean_text(sections["continuous_enrollment"]),
         "numerator": clean_text(sections["numerator"]),
         "denominator": clean_text(sections["denominator"]),
+        "best_practice_tips": clean_text(sections["best_practice_tips"]),
         "exclusions": clean_text(sections["exclusions"]),
+        "measure_codes": clean_text(sections["measure_codes"]),
+        "exclusion_codes": clean_text(sections["exclusion_codes"]),
         "tables": measure["tables"],
-    }
+        }
+    )
 
 
 def merge_measure_records(records):
@@ -354,10 +528,16 @@ def merge_measure_records(records):
                 "measure_name": measure_name,
                 "pages": [],
                 "description": "",
+                "product_lines": "",
+                "definition": "",
                 "eligible_population": "",
+                "continuous_enrollment": "",
                 "denominator": "",
                 "numerator": "",
+                "best_practice_tips": "",
                 "exclusions": "",
+                "measure_codes": "",
+                "exclusion_codes": "",
                 "tables": [],
             },
         )
@@ -370,10 +550,16 @@ def merge_measure_records(records):
 
         for field in [
             "description",
+            "product_lines",
+            "definition",
             "eligible_population",
+            "continuous_enrollment",
             "denominator",
             "numerator",
+            "best_practice_tips",
             "exclusions",
+            "measure_codes",
+            "exclusion_codes",
         ]:
             incoming_value = str(record.get(field, "")).strip()
             if len(incoming_value) > len(existing.get(field, "").strip()):
@@ -402,10 +588,16 @@ Produce a JSON array. Each item must be an object with exactly these keys:
 - measure_name
 - pages
 - description
+- product_lines
+- definition
 - eligible_population
+- continuous_enrollment
 - denominator
 - numerator
+- best_practice_tips
 - exclusions
+- measure_codes
+- exclusion_codes
 - tables
 
 Rules:
@@ -521,14 +713,20 @@ def build_dataset_context(measures, max_measures=12):
     sections = []
 
     for measure in selected_measures:
+        measure = normalize_measure_record(measure)
         sections.append(
             f"""
 Measure Name: {measure.get("measure_name", "")}
 Description: {measure.get("description", "")}
+Definition: {measure.get("definition", "")}
 Eligible Population: {measure.get("eligible_population", "")}
+Continuous Enrollment: {measure.get("continuous_enrollment", "")}
 Denominator: {measure.get("denominator", "")}
 Numerator: {measure.get("numerator", "")}
+Best Practice and Measure Tips: {measure.get("best_practice_tips", "")}
 Exclusions: {measure.get("exclusions", "")}
+Measure Codes: {measure.get("measure_codes", "")}
+Exclusion Codes: {measure.get("exclusion_codes", "")}
 """.strip()
         )
 
@@ -732,18 +930,13 @@ def get_suggested_questions(measures):
 
 
 def render_measure_details(measure):
-    fields = [
-        ("Description", "description"),
-        ("Eligible Population", "eligible_population"),
-        ("Denominator", "denominator"),
-        ("Numerator", "numerator"),
-        ("Exclusions", "exclusions"),
-    ]
+    measure = normalize_measure_record(measure)
+    fields = MEASURE_DETAIL_FIELDS
 
     for label, key in fields:
         st.markdown(f'<div class="detail-label">{label}</div>', unsafe_allow_html=True)
         value = measure.get(key, "")
-        st.write(value if value else "Not available.")
+        st.markdown(format_measure_detail_as_bullets(value))
 
 
 def render_search_results(ranked_results):
@@ -780,6 +973,33 @@ def format_answer_as_bullets(answer):
                 chunks.append(f"- {cleaned}")
 
     return "\n".join(chunks) if chunks else "- No answer returned."
+
+
+def format_measure_detail_as_bullets(value):
+    text = str(value or "").strip()
+    if not text:
+        return "Not available."
+
+    normalized = (
+        text.replace("•", "\n• ")
+        .replace("`", "\n• ")
+        .replace("»", "\n• ")
+    )
+    lines = [line.strip() for line in normalized.splitlines() if line.strip()]
+    bullets = []
+
+    for line in lines:
+        cleaned = re.sub(r"^\d+\.\s*", "", line).strip()
+        cleaned = re.sub(r"^[-*•]+\s*", "", cleaned).strip()
+        if cleaned:
+            bullets.append(f"- {cleaned}")
+
+    if bullets:
+        return "\n".join(bullets)
+
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    bullets = [f"- {sentence.strip()}" for sentence in sentences if sentence.strip()]
+    return "\n".join(bullets) if bullets else "Not available."
 
 
 def use_selected_measure_question():

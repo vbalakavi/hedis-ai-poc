@@ -10,7 +10,7 @@ This folder contains a self-contained proof of concept for exploring HEDIS measu
 - `genQuestions.py`: generates suggested questions
 - `openai_helper.py`: loads `OPENAI_API_KEY` from local `.env`
 - `hedis_measures.json`: active structured dataset used by the app
-- `hedis_measure.pdf`: sample PDF included for testing the upload flow
+- `uploaded_hedis_source.pdf`: most recently uploaded PDF source, if present
 
 ## Requirements
 
@@ -22,7 +22,7 @@ This folder contains a self-contained proof of concept for exploring HEDIS measu
 1. Open a terminal in this folder:
 
 ```bash
-cd hedis-ai-poc
+cd 3_Hedis_AI
 ```
 
 2. Create and activate a virtual environment:
@@ -106,6 +106,7 @@ Ask your colleague to test these flows:
 
 ## Notes
 
-- This project is self-contained within this repository except for installed Python packages and access to the OpenAI API.
+- This project is self-contained within `3_Hedis_AI` except for installed Python packages and access to the OpenAI API.
 - Do not share your real `.env` file in source control or over email/chat.
 - If upload conversion replaces the dataset, the active `hedis_measures.json` in this folder is updated.
+# hedis-ai-poc
