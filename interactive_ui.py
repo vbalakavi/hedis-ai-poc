@@ -1,5 +1,7 @@
 from io import BytesIO
+import hmac
 import json
+import os
 from pathlib import Path
 import re
 
@@ -76,9 +78,106 @@ DATASET_QUESTIONS = [
     "Which measures involve preventive screening or wellness care?",
 ]
 
+USER_AUTH_USERNAME_KEY = "APP_USER_USERNAME"
+USER_AUTH_PASSWORD_KEY = "APP_USER_PASSWORD"
+ADMIN_AUTH_PASSWORD_KEY = "APP_ADMIN_PASSWORD"
+
 
 def tokenize(text):
     return re.findall(r"[a-z0-9]+", str(text).lower())
+
+
+def get_app_secret(name, base_dir=None):
+    env_value = os.environ.get(name)
+    if env_value:
+        return env_value
+
+    try:
+        secret_value = st.secrets.get(name)
+    except Exception:
+        secret_value = None
+    if secret_value:
+        os.environ[name] = secret_value
+        return secret_value
+
+    if base_dir is None:
+        return None
+
+    env_path = base_dir / ".env"
+    if not env_path.exists():
+        return None
+
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        if line.strip().startswith(f"{name}="):
+            _, raw_value = line.split("=", 1)
+            cleaned = raw_value.strip().strip("\"'“”")
+            if cleaned:
+                os.environ[name] = cleaned
+                return cleaned
+
+    return None
+
+
+def user_auth_configured(base_dir):
+    return bool(get_app_secret(USER_AUTH_USERNAME_KEY, base_dir)) and bool(
+        get_app_secret(USER_AUTH_PASSWORD_KEY, base_dir)
+    )
+
+
+def admin_auth_configured(base_dir):
+    return bool(get_app_secret(ADMIN_AUTH_PASSWORD_KEY, base_dir))
+
+
+def credentials_match(expected_value, candidate_value):
+    return bool(expected_value) and hmac.compare_digest(
+        str(expected_value), str(candidate_value or "")
+    )
+
+
+def login_shared_user(base_dir):
+    expected_username = get_app_secret(USER_AUTH_USERNAME_KEY, base_dir)
+    expected_password = get_app_secret(USER_AUTH_PASSWORD_KEY, base_dir)
+    entered_username = st.session_state.get("login_username", "").strip()
+    entered_password = st.session_state.get("login_password", "")
+
+    if credentials_match(expected_username, entered_username) and credentials_match(
+        expected_password, entered_password
+    ):
+        st.session_state["is_user_authenticated"] = True
+        st.session_state["login_error"] = ""
+        st.session_state["login_password"] = ""
+        return
+
+    st.session_state["is_user_authenticated"] = False
+    st.session_state["is_admin_authenticated"] = False
+    st.session_state["login_error"] = "Invalid shared username or password."
+
+
+def login_admin(base_dir):
+    expected_password = get_app_secret(ADMIN_AUTH_PASSWORD_KEY, base_dir)
+    entered_password = st.session_state.get("admin_password", "")
+
+    if credentials_match(expected_password, entered_password):
+        st.session_state["is_admin_authenticated"] = True
+        st.session_state["admin_login_error"] = ""
+        st.session_state["admin_password"] = ""
+        return
+
+    st.session_state["is_admin_authenticated"] = False
+    st.session_state["admin_login_error"] = "Invalid admin password."
+
+
+def logout_shared_user():
+    st.session_state["is_user_authenticated"] = False
+    st.session_state["is_admin_authenticated"] = False
+    st.session_state["current_view"] = "Home"
+    st.session_state["login_username"] = ""
+    st.session_state["login_password"] = ""
+
+
+def logout_admin():
+    st.session_state["is_admin_authenticated"] = False
+    st.session_state["admin_password"] = ""
 
 
 def clean_inline_text(value):
@@ -1511,6 +1610,8 @@ div[data-testid="stButton"] > button[kind="secondary"]:hover {
     generated_questions = get_suggested_questions(measures)
     measure_questions = list(dict.fromkeys(MEASURE_QUESTIONS + generated_questions))
     dataset_questions = list(dict.fromkeys(DATASET_QUESTIONS + generated_questions))
+    shared_user_auth_ready = user_auth_configured(base_dir)
+    admin_auth_ready = admin_auth_configured(base_dir)
     measure_names = sorted(
         [measure.get("measure_name", "Unknown Measure") for measure in measures],
         key=lambda name: name.lower(),
@@ -1539,10 +1640,22 @@ div[data-testid="stButton"] > button[kind="secondary"]:hover {
         st.session_state["dataset_question_select"] = dataset_questions[0]
     if "current_view" not in st.session_state:
         st.session_state["current_view"] = "Home"
+    if "is_user_authenticated" not in st.session_state:
+        st.session_state["is_user_authenticated"] = False
+    if "is_admin_authenticated" not in st.session_state:
+        st.session_state["is_admin_authenticated"] = False
+    if "login_error" not in st.session_state:
+        st.session_state["login_error"] = ""
+    if "admin_login_error" not in st.session_state:
+        st.session_state["admin_login_error"] = ""
     if "applied_measure_search" not in st.session_state:
         st.session_state["applied_measure_search"] = ""
     if "measure_search_input" not in st.session_state:
         st.session_state["measure_search_input"] = ""
+    if not shared_user_auth_ready:
+        st.session_state["is_user_authenticated"] = True
+    if not admin_auth_ready:
+        st.session_state["is_admin_authenticated"] = False
     if st.session_state.pop("pending_search_reset", False):
         st.session_state["measure_search_input"] = ""
         st.session_state["applied_measure_search"] = ""
@@ -1552,12 +1665,13 @@ div[data-testid="stButton"] > button[kind="secondary"]:hover {
         st.session_state["current_view"] = ask_measure_menu_label
     if st.session_state.get("current_view") == "Measure Details":
         st.session_state["current_view"] = measure_details_menu_label
-    if st.session_state.get("current_view", "") not in view_options:
+    accessible_view_options = view_options if st.session_state["is_user_authenticated"] else ["Home"]
+    if st.session_state.get("current_view", "") not in accessible_view_options:
         st.session_state["current_view"] = "Home"
 
     current_view = st.radio(
         "Main Menu",
-        view_options,
+        accessible_view_options,
         key="current_view",
         horizontal=True,
         label_visibility="collapsed",
@@ -1569,53 +1683,83 @@ div[data-testid="stButton"] > button[kind="secondary"]:hover {
 <div class="sidebar-shell">
     <div class="sidebar-title">Control Panel</div>
     <div class="sidebar-copy">
-        SEARCH / CHOOSE measure
+        Access and navigation
     </div>
 </div>
 """,
             unsafe_allow_html=True,
         )
-        search_text = st.text_input(
-            "Filter measures by name",
-            placeholder="Type part of a measure name",
-            key="measure_search_input",
-        )
-        search_col, clear_col = st.columns(2)
-        search_col.button("Search", use_container_width=True, on_click=apply_measure_search)
-        clear_col.button("Clear", use_container_width=True, on_click=clear_measure_search)
+        if shared_user_auth_ready:
+            if not st.session_state["is_user_authenticated"]:
+                st.caption("Sign in with the shared user credentials to unlock the app.")
+                st.text_input("Username", key="login_username")
+                st.text_input("Password", type="password", key="login_password")
+                st.button(
+                    "Sign In",
+                    use_container_width=True,
+                    on_click=login_shared_user,
+                    args=(base_dir,),
+                )
+                if st.session_state.get("login_error"):
+                    st.error(st.session_state["login_error"])
+            else:
+                st.button("Sign Out", use_container_width=True, on_click=logout_shared_user)
+        else:
+            st.info("Shared user login is not configured, so full navigation stays open locally.")
 
-        search_value = st.session_state.get("applied_measure_search", "").strip().lower()
-        show_all_requested = search_value in {
-            "all",
-            "show all",
-            "list all",
-            "list all measures",
-            "show all measures",
-        }
-
-        filtered_names = (
-            sorted(
-                [
-                    measure.get("measure_name", "Unknown Measure")
-                    for measure in measures
-                    if measure_matches_search(measure, search_value)
-                ],
-                key=lambda name: name.lower(),
-            )
-            if search_value and not show_all_requested
-            else measure_names
-        )
-
-        if search_value and not filtered_names:
-            st.warning("No measures matched that search. Showing all measures instead.")
-            filtered_names = measure_names
-
-        if not filtered_names:
-            filtered_names = measure_names
-
-        if search_value and not show_all_requested:
+        if st.session_state["is_user_authenticated"]:
             st.markdown(
-                f"""
+                """
+<div class="sidebar-shell">
+    <div class="sidebar-title">Measure Search</div>
+    <div class="sidebar-copy">
+        SEARCH / CHOOSE measure
+    </div>
+</div>
+""",
+                unsafe_allow_html=True,
+            )
+            st.text_input(
+                "Filter measures by name",
+                placeholder="Type part of a measure name",
+                key="measure_search_input",
+            )
+            search_col, clear_col = st.columns(2)
+            search_col.button("Search", use_container_width=True, on_click=apply_measure_search)
+            clear_col.button("Clear", use_container_width=True, on_click=clear_measure_search)
+
+            search_value = st.session_state.get("applied_measure_search", "").strip().lower()
+            show_all_requested = search_value in {
+                "all",
+                "show all",
+                "list all",
+                "list all measures",
+                "show all measures",
+            }
+
+            filtered_names = (
+                sorted(
+                    [
+                        measure.get("measure_name", "Unknown Measure")
+                        for measure in measures
+                        if measure_matches_search(measure, search_value)
+                    ],
+                    key=lambda name: name.lower(),
+                )
+                if search_value and not show_all_requested
+                else measure_names
+            )
+
+            if search_value and not filtered_names:
+                st.warning("No measures matched that search. Showing all measures instead.")
+                filtered_names = measure_names
+
+            if not filtered_names:
+                filtered_names = measure_names
+
+            if search_value and not show_all_requested:
+                st.markdown(
+                    f"""
 <div class="search-summary">
     <div class="search-summary-copy">
         <strong>{len(filtered_names)}</strong> matching measure(s) for
@@ -1623,35 +1767,37 @@ div[data-testid="stButton"] > button[kind="secondary"]:hover {
     </div>
 </div>
 """,
-                unsafe_allow_html=True,
-            )
-        else:
-            st.markdown(
-                f"""
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    f"""
 <div class="search-summary">
     <div class="search-summary-copy">
         <strong>{len(measure_names)}</strong> available measures
     </div>
 </div>
 """,
-                unsafe_allow_html=True,
+                    unsafe_allow_html=True,
+                )
+
+            select_options = [MEASURE_PLACEHOLDER] + filtered_names
+            current_selected = st.session_state.get("selected_measure_name")
+            if current_selected not in select_options:
+                st.session_state["selected_measure_name"] = MEASURE_PLACEHOLDER
+
+            selected_measure_name = st.selectbox(
+                "Select a measure",
+                select_options,
+                key="selected_measure_name",
+                on_change=handle_measure_change,
+                format_func=format_measure_label,
             )
 
-        select_options = [MEASURE_PLACEHOLDER] + filtered_names
-        current_selected = st.session_state.get("selected_measure_name")
-        if current_selected not in select_options:
-            st.session_state["selected_measure_name"] = MEASURE_PLACEHOLDER
-
-        selected_measure_name = st.selectbox(
-            "Select a measure",
-            select_options,
-            key="selected_measure_name",
-            on_change=handle_measure_change,
-            format_func=format_measure_label,
-        )
-
-        if not api_key:
-            st.warning("OpenAI API key not found. AI actions will be disabled.")
+            if not api_key:
+                st.warning("OpenAI API key not found. AI actions will be disabled.")
+        else:
+            selected_measure_name = MEASURE_PLACEHOLDER
 
     selected_measure = next(
         (
@@ -1675,6 +1821,8 @@ div[data-testid="stButton"] > button[kind="secondary"]:hover {
 """,
             unsafe_allow_html=True,
         )
+        if shared_user_auth_ready and not st.session_state["is_user_authenticated"]:
+            st.info("Home stays open, but the rest of the app unlocks only after shared user sign-in.")
         col1, col2, col3 = st.columns(3, gap="medium")
         with col1:
             st.markdown(
@@ -1727,55 +1875,85 @@ div[data-testid="stButton"] > button[kind="secondary"]:hover {
 """,
             unsafe_allow_html=True,
         )
-        upload_col, info_col = st.columns([1, 1], gap="medium")
-        with upload_col:
-            uploaded_pdf = st.file_uploader(
-                "",
-                accept_multiple_files=False,
-                help="This converts the PDF into the JSON structure used by the rest of the POC.",
-                label_visibility="collapsed",
-            )
-            valid_pdf_upload = is_pdf_upload(uploaded_pdf)
-            if uploaded_pdf is not None and not valid_pdf_upload:
-                st.warning("Please choose a PDF file before converting.")
-            button_left_col, button_right_spacer = st.columns([0.62, 0.38], gap="small")
-            with button_left_col:
-                if st.button(
-                    "Convert PDF to JSON",
-                    disabled=(not api_key) or (uploaded_pdf is None) or (not valid_pdf_upload),
-                    use_container_width=True,
-                ):
-                    try:
-                        handle_pdf_upload(base_dir, uploaded_pdf)
-                    except Exception as exc:
-                        st.error(f"PDF conversion failed: {exc}")
-        with info_col:
-            if uploaded_pdf is not None:
-                st.markdown(
-                    f"""
+        if not st.session_state["is_user_authenticated"]:
+            st.warning("Sign in with the shared user credentials to move beyond Home.")
+        else:
+            if admin_auth_ready:
+                admin_col, admin_status_col = st.columns([1, 1], gap="medium")
+                with admin_col:
+                    if not st.session_state["is_admin_authenticated"]:
+                        st.text_input("Admin Password", type="password", key="admin_password")
+                        st.button(
+                            "Unlock Uploads",
+                            use_container_width=True,
+                            on_click=login_admin,
+                            args=(base_dir,),
+                        )
+                    else:
+                        st.button("Lock Uploads", use_container_width=True, on_click=logout_admin)
+                with admin_status_col:
+                    if not st.session_state["is_admin_authenticated"]:
+                        st.caption("Enter the admin password to enable PDF upload and dataset replacement.")
+                        if st.session_state.get("admin_login_error"):
+                            st.error(st.session_state["admin_login_error"])
+                    else:
+                        st.success("Admin upload access enabled.")
+            else:
+                st.info("Admin upload password is not configured yet.")
+
+            if not st.session_state["is_admin_authenticated"]:
+                st.warning("Admin unlock is required before anyone can upload or replace the dataset.")
+                return
+
+            upload_col, info_col = st.columns([1, 1], gap="medium")
+            with upload_col:
+                uploaded_pdf = st.file_uploader(
+                    "",
+                    accept_multiple_files=False,
+                    help="This converts the PDF into the JSON structure used by the rest of the POC.",
+                    label_visibility="collapsed",
+                )
+                valid_pdf_upload = is_pdf_upload(uploaded_pdf)
+                if uploaded_pdf is not None and not valid_pdf_upload:
+                    st.warning("Please choose a PDF file before converting.")
+                button_left_col, button_right_spacer = st.columns([0.62, 0.38], gap="small")
+                with button_left_col:
+                    if st.button(
+                        "Convert PDF to JSON",
+                        disabled=(not api_key) or (uploaded_pdf is None) or (not valid_pdf_upload),
+                        use_container_width=True,
+                    ):
+                        try:
+                            handle_pdf_upload(base_dir, uploaded_pdf)
+                        except Exception as exc:
+                            st.error(f"PDF conversion failed: {exc}")
+            with info_col:
+                if uploaded_pdf is not None:
+                    st.markdown(
+                        f"""
 <div class="uploaded-file-bar">
     Selected file: <span class="uploaded-file-name">{uploaded_pdf.name}</span>
 </div>
 """,
-                    unsafe_allow_html=True,
-                )
-            else:
-                st.markdown(
-                    """
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.markdown(
+                        """
 <div class="uploaded-file-bar">
     No PDF selected yet.
 </div>
 """,
-                    unsafe_allow_html=True,
-                )
-        if st.session_state.get("pdf_upload_success"):
-            st.success(st.session_state["pdf_upload_success"])
-        if uploaded_pdf is not None and valid_pdf_upload:
-            st.caption("Ready to process the selected PDF.")
-        elif uploaded_pdf is not None:
-            st.caption("Choose a file with a .pdf extension to enable conversion.")
-        else:
-            st.caption("Choose a PDF file to enable conversion.")
+                        unsafe_allow_html=True,
+                    )
+            if st.session_state.get("pdf_upload_success"):
+                st.success(st.session_state["pdf_upload_success"])
+            if uploaded_pdf is not None and valid_pdf_upload:
+                st.caption("Ready to process the selected PDF.")
+            elif uploaded_pdf is not None:
+                st.caption("Choose a file with a .pdf extension to enable conversion.")
+            else:
+                st.caption("Choose a PDF file to enable conversion.")
 
     elif current_view == measure_details_menu_label:
         if selected_measure is None:

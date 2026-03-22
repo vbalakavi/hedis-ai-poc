@@ -54,6 +54,12 @@ streamlit run interactive_ui.py
 
 Then open the local URL shown in the terminal, typically `http://localhost:8501`.
 
+You can also use the helper script:
+
+```bash
+./start_app.sh
+```
+
 ## Hosting
 
 You can host this app and keep your OpenAI key private by storing it as a platform secret instead of committing a `.env` file.
@@ -72,9 +78,19 @@ interactive_ui.py
 
 ```toml
 OPENAI_API_KEY = "your_key_here"
+APP_USER_USERNAME = "shared_username"
+APP_USER_PASSWORD = "shared_password"
+APP_ADMIN_PASSWORD = "admin_only_password"
 ```
 
-5. Deploy the app and share the generated URL with your colleague.
+5. Deploy the app and share the generated URL with users who should have the shared login.
+
+### Access Model
+
+- `Home` remains visible before login.
+- Users need `APP_USER_USERNAME` and `APP_USER_PASSWORD` to access Overview, measure pages, and Q&A.
+- Only someone with `APP_ADMIN_PASSWORD` can unlock PDF upload and dataset replacement.
+- Local test credentials should stay only in `.streamlit/secrets.toml`, which is ignored by Git.
 
 ### Other Hosting Options
 
@@ -102,7 +118,9 @@ Ask your colleague to test these flows:
 2. Generate the overview and confirm the response is coherent.
 3. Ask a few measure-specific and dataset-level questions.
 4. Upload a PDF and confirm it converts into a refreshed `hedis_measures.json`.
-5. Confirm the selected filename, button layout, and upload warnings behave as expected.
+5. Confirm the shared login gates everything except `Home`.
+6. Confirm the admin password is required before upload controls appear.
+7. Confirm the selected filename, button layout, and upload warnings behave as expected.
 
 ## Notes
 
